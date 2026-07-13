@@ -1,0 +1,93 @@
+{
+  "_meta": {
+    "generated_by": "gh CLI + GraphQL, following prompt template create-pine-script-project.md",
+    "issue": "https://github.com/prajoria/copilotmem/issues/2",
+    "created_at": "2026-07-13"
+  },
+  "project": {
+    "id": "PVT_kwHOAOc7384BdTSZ",
+    "number": 6,
+    "url": "https://github.com/users/prajoria/projects/6",
+    "title": "CopilotMem Development",
+    "owner": "prajoria"
+  },
+  "fields": {
+    "Area": {
+      "id": "PVTSSF_lAHOAOc7384BdTSZzhX1yEM",
+      "type": "SINGLE_SELECT",
+      "options": {
+        "Core": "5c77a466",
+        "Pipeline": "1e99f120",
+        "Memory": "b4efceca",
+        "Compress": "c48d26f4",
+        "CLI": "4c53d9ad",
+        "Shared": "d55e7010",
+        "Docs": "d657f671",
+        "Tests": "5c1515cc",
+        "Infra": "c28b59d2",
+        "Governance": "305656a5"
+      }
+    },
+    "Priority": {
+      "id": "PVTSSF_lAHOAOc7384BdTSZzhX1yHE",
+      "type": "SINGLE_SELECT",
+      "options": {
+        "P0": "ffc28be7",
+        "P1": "c7c7ff80",
+        "P2": "12d42fa1",
+        "P3": "dcfb642f"
+      }
+    },
+    "Type": {
+      "id": "PVTSSF_lAHOAOc7384BdTSZzhX1yH8",
+      "type": "SINGLE_SELECT",
+      "options": {
+        "Epic": "9db5d431",
+        "Feature": "dec0f1b3",
+        "Task": "bec1c05a",
+        "Bug": "29f625df",
+        "Chore": "401d9813"
+      }
+    },
+    "Phase": {
+      "id": "PVTSSF_lAHOAOc7384BdTSZzhX1yIA",
+      "type": "SINGLE_SELECT",
+      "options": {
+        "Phase 0": "f31864df",
+        "Phase 1": "36b63408",
+        "Phase 2": "55b1be4c",
+        "Phase 3": "f55fd378"
+      }
+    },
+    "Start": {
+      "id": "PVTF_lAHOAOc7384BdTSZzhX1yIE",
+      "type": "DATE"
+    },
+    "End": {
+      "id": "PVTF_lAHOAOc7384BdTSZzhX1yII",
+      "type": "DATE"
+    }
+  },
+  "labels": {
+    "umbrella": ["copilotmem"],
+    "area": ["area-core", "area-pipeline", "area-memory", "area-compress", "area-cli", "area-shared", "area-docs", "area-tests", "area-infra", "area-governance"],
+    "priority": ["priority-p0", "priority-p1", "priority-p2", "priority-p3"],
+    "type": ["type-epic", "type-feature", "type-task", "type-bug", "type-chore", "type-infra", "type-docs"],
+    "phase": ["phase-0", "phase-1", "phase-2", "phase-3"],
+    "legacy": ["governance"]
+  },
+  "epic": {
+    "issue_number": 3,
+    "url": "https://github.com/prajoria/copilotmem/issues/3",
+    "node_id": "I_kwDOTWs9hs8AAAABIqkimQ",
+    "project_item_id": "PVTI_lAHOAOc7384BdTSZzgyr398",
+    "fields_set": {
+      "Type": "Epic",
+      "Priority": "P1",
+      "Phase": "Phase 0",
+      "Start": "2026-07-13",
+      "End": "2026-10-11",
+      "Area": null
+    }
+  }
+}
