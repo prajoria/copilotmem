@@ -36,6 +36,20 @@ CopilotMem consolidates capabilities from three upstream projects:
 
 Rationale for each choice is in PRD §7.2.
 
+## Contributor setup
+
+After cloning, install the in-repo git hooks so commits are checked against the issue-first workflow (see [`SESSION-START.md`](SESSION-START.md) §8.5):
+
+```bash
+./scripts/install-hooks.sh          # Linux / macOS / Git Bash
+```
+
+```powershell
+.\scripts\install-hooks.ps1         # Windows PowerShell 7+
+```
+
+Both scripts are idempotent and only set `git config core.hooksPath .githooks` in this clone.
+
 ## License
 
 Apache License 2.0. See `LICENSE`.

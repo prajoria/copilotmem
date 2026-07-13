@@ -66,6 +66,10 @@ git submodule status
 # 3. Repository owner identity
 git config user.name           # Expected: Prashant Rajoria
 git config user.email          # Expected: prashant.rajoria@gmail.com
+
+# 4. Commit-msg hook installed (issue-first workflow — see §8.5)
+git config core.hooksPath      # Expected: .githooks
+# If empty, run: ./scripts/install-hooks.sh  (or .ps1 on Windows)
 ```
 
 If the submodule directory (`vendor/copilot-api/`) is empty after a fresh clone, run:
@@ -219,6 +223,26 @@ Phase 0 requires:
 - Do **not** vendor claude-mem or headroom source into this repo. They are ports, not imports. Copy the algorithmic ideas with attribution headers, don't paste files.
 - Do **not** introduce a build step that requires Python or Rust at install time. Optional prose compression uses a lazy Python sidecar; that's the only exception, and it must be opt-in.
 - Do **not** commit any file to `<state>/` or reference absolute paths that leak the developer's machine layout.
+
+### 8.5 Issue-first workflow (mandatory)
+
+**No significant work happens without a tracking GitHub issue filed first.** This is the missing rung under §8.1–8.4; commits point at branches, branches point at issues, issues are what a future session reads to understand *why* a change happened.
+
+- **"Significant work"** = anything that touches code, configuration, doc content (beyond typo fixes), the submodule set, GitHub settings (labels/milestones/repo config), CI, or the issue taxonomy itself.
+- **"Tracking issue"** = an open issue in [`prajoria/copilotmem`](https://github.com/prajoria/copilotmem/issues) with a scoped title, an exit criterion, and (if dependent) a `Depends on #N` line in the body.
+- **Commits, branches, and PRs cite the issue number**: `feat(pipeline): add extension loader (#12)`, branch `feat/12-extension-loader`, PR title `Add extension loader (#12)`.
+
+**Exceptions** (allow-listed in `.githooks/commit-msg`, must stay tiny):
+
+- `revert:` — reverting a broken commit; body cites the offending commit's issue number.
+- `docs(typo):` — typo/formatting fixes in Markdown that don't change meaning.
+- `docs(governance):` — the initial commit that introduced this rule and the hook itself.
+
+Local, unstaged exploration that is discarded before any `git add` is not "work" for the rule's purposes.
+
+**Enforcement**: `.githooks/commit-msg` rejects any commit lacking a `(#NN)` reference unless the message starts with an allow-listed prefix. Install it once per clone via `scripts/install-hooks.sh` (or `.ps1` on Windows). See §3 for the session-start check that verifies the hook is installed.
+
+**When you spawn parallel subagents**: each agent gets exactly one issue as its scope. Claim the issue in the parent turn (assign to yourself on GitHub) before dispatching the agent. Follow-up work the agent discovers gets a *new* issue filed and linked, not silent scope expansion.
 
 ---
 

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# .githooks/commit-msg
+#
+# Enforces the issue-first workflow declared in SESSION-START.md §8.5:
+# every commit message must contain a GitHub issue reference `(#NN)` unless
+# it begins with one of the allow-listed prefixes.
+#
+# Installed by scripts/install-hooks.{sh,ps1} via `git config core.hooksPath .githooks`.
+# Runs on `git commit`; the first argument is the path to the message file.
+
+set -euo pipefail
+
+msg_file="${1:?commit-msg hook: missing message file argument}"
+first_line="$(head -n 1 "$msg_file")"
+
+# Strip trailing whitespace/CR so Windows CRLF line endings don't confuse the matcher.
+first_line="${first_line%$'\r'}"
+
+# Allow-listed prefixes. Keep this list TINY. If you're tempted to add to it,
+# file an issue and change the rule via that issue instead.
+allowed_prefixes=(
+  "revert:"
+  "docs(typo):"
+  "docs(governance):"
+)
+
+for prefix in "${allowed_prefixes[@]}"; do
+  if [[ "$first_line" == "$prefix"* ]]; then
+    exit 0
+  fi
+done
+
+# Look for `(#NN)` anywhere in the message (subject or body). We match the whole
+# file, not just the first line, so a well-formed body citation counts too.
+if grep -Eq '\(#[0-9]+\)' "$msg_file"; then
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+[commit-msg hook] Commit REJECTED — missing GitHub issue reference.
+
+Every commit must cite a tracking issue on prajoria/copilotmem. Format:
+    feat(pipeline): add extension loader (#12)
+                                          ^^^^^
+
+Allow-listed prefixes that bypass the rule (see SESSION-START.md §8.5):
+    revert:
+    docs(typo):
+    docs(governance):
+
+If no issue exists yet, file one first:
+    gh issue create --repo prajoria/copilotmem --title "..." --body "..."
+
+Then amend the message to include (#NN) and try again.
+EOF
+exit 1

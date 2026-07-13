@@ -3,8 +3,9 @@
 **Version**: 0.4 (draft for review)
 **Status**: Repo bootstrapped; Phase 0 in progress
 **Owner**: TBD
-**Last updated**: 2026-07-12
+**Last updated**: 2026-07-13
 **Scope**: Single-user, single-workstation. Multi-session and multi-project support within that scope.
+**Change tracking**: Every substantive change to this repo is tracked by a GitHub issue on [`prajoria/copilotmem`](https://github.com/prajoria/copilotmem/issues) before work begins. See SESSION-START §8.5.
 
 ---
 
