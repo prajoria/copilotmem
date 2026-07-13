@@ -1,0 +1,45 @@
+# CopilotMem state directory
+# Windows: %LOCALAPPDATA%\copilotmem\
+# Unix:    ~/.local/share/copilotmem/
+# Never commit runtime state.
+
+# Node / Bun
+node_modules/
+.pnp/
+.pnp.js
+dist/
+build/
+*.tsbuildinfo
+
+# Bun compiled binaries
+copilotmem
+copilotmem.exe
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# Test artifacts
+coverage/
+.nyc_output/
+*.lcov
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Local config overrides
+config.local.toml
