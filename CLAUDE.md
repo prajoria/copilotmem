@@ -21,15 +21,25 @@ Key sections to know by number:
 
 ## Vendored upstream
 
-`vendor/copilot-api/` is a **git submodule** pointing at `prajoria/copilot-api` (see `.gitmodules`). After a fresh clone:
+Three submodules under `vendor/`, all pointing at `prajoria/*` forks. After a fresh clone:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-Treat submodule contents as read-only vendor code. The proxy's own routes/translation/upstream/auth live under `src/core/` as **thin adapters** into the submodule (§7.2.1). Bumping the submodule is done via `scripts/bump-copilot-api.ts` once that script exists.
+`git submodule status` should show **three** entries after init.
 
-The other two source projects (`claude-mem`, `headroom`) are **ported to TypeScript in-tree** under `src/extensions/memory/` and `src/extensions/compress/`, with per-file attribution headers citing the upstream commit SHA — they are not submodules (§7.2.2, §7.2.3).
+| Submodule | Upstream fork | Integration mode | Where CopilotMem uses it |
+|---|---|---|---|
+| `vendor/copilot-api/` | `prajoria/copilot-api` | **In-process** (ESM import) | `src/core/` — thin adapters for routes/translation/upstream/auth |
+| `vendor/claude-mem/` | `prajoria/claude-mem` (fork of `thedotmack/claude-mem`) | **In-process, SELECTIVE** per PRD §7.2.2 allowlist | `src/extensions/memory/` (Phase 1) — thin wrappers over storage/retrieval/viewer; summarizer replaced by a shim (§7.2.5) |
+| `vendor/headroom/` | `prajoria/headroom` | **Supervised subprocess** (UDS on Linux/macOS; Named Pipe on Windows) | `src/extensions/compress/` (Phase 2) — IPC client + supervisor |
+
+**Never edit `vendor/*/` in-place from this repo.** Bug fixes flow via the developer's working clone of the fork (e.g. `H:\masterswork\git\OpenBBTechnical\copilot-api\`) → push to `prajoria/*` → `git submodule update` here.
+
+**Every import from `vendor/claude-mem/` or `vendor/headroom/` must pass the three-step auth-chain audit** in SESSION-START §9.6 before it lands. This is enforced by contract test `tests/contract/no-second-auth.test.ts` (issue #14). See PRD §7.2.5 for the rule and §7.2.2 / §7.2.3 for each submodule's denylist.
+
+Bumping a submodule SHA is done in a dedicated PR with its own tracking issue.
 
 ## Non-negotiable invariants
 

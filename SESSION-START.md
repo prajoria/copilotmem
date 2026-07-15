@@ -60,8 +60,11 @@ git log --oneline --all
 
 # 2. Submodule state
 git submodule status
-# Expected: <sha> vendor/copilot-api (v0.7.0-<n>-g<sha>)
-# Submodule URL should be https://github.com/prajoria/copilot-api.git
+# Expected (after A3 = #9 landed): THREE entries
+#   <sha> vendor/claude-mem (heads/main)
+#   <sha> vendor/copilot-api (v0.7.0-<n>-g<sha>)
+#   <sha> vendor/headroom (heads/main)
+# All three URLs should be under github.com/prajoria/*
 
 # 3. Repository owner identity
 git config user.name           # Expected: Prashant Rajoria

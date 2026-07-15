@@ -1,3 +1,9 @@
 [submodule "vendor/copilot-api"]
 	path = vendor/copilot-api
 	url = https://github.com/prajoria/copilot-api.git
+[submodule "vendor/claude-mem"]
+	path = vendor/claude-mem
+	url = https://github.com/prajoria/claude-mem.git
+[submodule "vendor/headroom"]
+	path = vendor/headroom
+	url = https://github.com/prajoria/headroom.git
