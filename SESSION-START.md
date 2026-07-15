@@ -82,29 +82,32 @@ git submodule update --init --recursive
 
 ## 4. The submodule strategy (critical to understand)
 
-CopilotMem uses a **hybrid** approach for its three source projects. This is not a common pattern; misunderstanding it will produce wrong architectural decisions.
+CopilotMem uses a **uniform three-submodule aggregator model** for its source projects. All three live under `vendor/`; language decides integration mode. This replaces the earlier "hybrid: one submodule + two ports" plan (see PRD §7.2 v0.5 changelog for rationale).
 
-| Source project | Strategy | Location | Why |
+| Source project | Location | Integration mode | Auth-surface handling |
 |---|---|---|---|
-| [`prajoria/copilot-api`](https://github.com/prajoria/copilot-api) | **Git submodule** | `vendor/copilot-api/` | Same language (TypeScript), small (~2500 LOC), stable, well-scoped protocol translation. Cheap upstream sync. |
-| [`thedotmack/claude-mem`](https://github.com/thedotmack/claude-mem) | **Ported / rewritten** | Will live in `src/extensions/memory/` | Wrong shape (Claude Code IDE plugin), 30k LOC of unwanted surface (Chroma vector store, React viewer, PostgreSQL server mode, multi-host installers). |
-| [`prajoria/headroom`](https://github.com/prajoria/headroom) | **Ported / rewritten** | Will live in `src/extensions/compress/` | Wrong language (Python 76.8% + Rust 18.4%). Would force a Python+Rust toolchain into every build. |
+| [`prajoria/copilot-api`](https://github.com/prajoria/copilot-api) | `vendor/copilot-api/` | **In-process** (ESM import) | Its GitHub Copilot device-code flow **is** CopilotMem's single sanctioned auth chain. Imported as-is. |
+| [`prajoria/claude-mem`](https://github.com/prajoria/claude-mem) (forked from `thedotmack/claude-mem`) | `vendor/claude-mem/` | **In-process, SELECTIVE** (ESM import per PRD §7.2.2 allowlist) | Denylist blocks `EnvManager`, `ClaudeProvider`, `KnowledgeAgent`, plugin CLI/hooks/npx surfaces. Summarizer replaced by `src/extensions/memory/summarizer.ts` shim. |
+| [`prajoria/headroom`](https://github.com/prajoria/headroom) | `vendor/headroom/` | **Supervised subprocess** (UDS on Linux/macOS; Named Pipe on Windows) | Launched in a config that disables hosted-inference/telemetry. No LLM calls in the compression path. Audited before enabling per §9.6. |
 
-**Only copilot-api is a submodule.** The other two are reimplementations in TypeScript with attribution headers referencing the upstream commit SHA they were derived from. This is documented in `docs/PRD.md` §7.2.
+**All three are your forks under `prajoria/`.** This means bug fixes flow via `H:\masterswork\git\OpenBBTechnical\copilot-api\` (and equivalent working clones) → push → `git submodule update` in this repo. Never edit `vendor/*/` in-place from CopilotMem.
 
-**The submodule URL points at Prashant's own fork** (`prajoria/copilot-api`), not upstream `ericc-ch/copilot-api`. The developer's daily working copy of the fork lives at `H:\masterswork\git\OpenBBTechnical\copilot-api\` — same remote, so the submodule and the working copy naturally stay in sync when the developer bumps the SHA.
+**Do not import from a submodule without an audit.** Every file imported from `vendor/claude-mem/` or `vendor/headroom/` must pass the three-step auth-chain audit in §9.6 first. Grep-based contract test `tests/contract/no-second-auth.test.ts` (landing in issue #14) enforces this on every commit.
+
+**Change from earlier revisions**: Sessions predating #7 (PRD v0.5) may have been briefed on a plan that called claude-mem and headroom "ported / rewritten in TypeScript" — that plan is superseded. If you find a CLAUDE.md, SESSION-START, or PRD reference implying a port for those two, treat it as stale and either edit or file an issue.
 
 ---
 
 ## 5. Non-negotiable design invariants
 
-These come directly from PRD §2 and §4. Any code you write must respect them.
+These come directly from PRD §2, §4, and §7.2.5. Any code you write must respect them.
 
 1. **The vanilla proxy contract is inviolable.** With all extensions disabled or crashing, CopilotMem must forward requests to Copilot with byte-identical results to a bare proxy. Contract tests will enforce this. Any extension that can degrade the base path is a bug.
 2. **Extensions fail open.** Each extension runs inside a try/catch boundary. Extension crashes get logged and the affected extension is skipped for that request; the request still succeeds via the remaining pipeline.
-3. **Local-first storage.** No hosted services, no cloud calls except to the configured upstream. All state lives under the CopilotMem state directory (see §7.5 of the PRD).
-4. **Single runtime, single database.** One Bun process. One SQLite file. External deps like Python (for optional prose compression) are opt-in only.
-5. **Windows tested first.** File-locking, atomic writes, encoding assumptions that hold on Unix but break on Windows are a known category of bug. All features need Windows CI to pass.
+3. **Single-auth-chain rule** (PRD §7.2.5). No caller of any CopilotMem component may require a Claude/Anthropic OAuth login separate from the Copilot upstream token CopilotMem already holds. Every internal LLM call routes through `http://127.0.0.1:4242` with `X-CopilotMem-Extensions: none` as recursion guard. Enforced by `tests/contract/no-second-auth.test.ts` + per-vendored-file audit (§9.6). **This is what makes CopilotMem architecturally different from a naive tool aggregator; losing it collapses the product's value.**
+4. **Local-first storage.** No hosted services, no cloud calls except to the configured upstream. All state lives under the CopilotMem state directory (see §7.5 of the PRD).
+5. **Single install bundle** (PRD §10.5 v0.5). One CopilotMem binary + one pre-built headroom sidecar + submodule copies = one download for the user. Internally three projects; externally one bundle.
+6. **Windows tested first.** File-locking, atomic writes, encoding assumptions that hold on Unix but break on Windows are a known category of bug. All features need Windows CI to pass.
 
 ---
 
@@ -126,8 +129,11 @@ CopilotMem must coexist with the developer's existing tools during migration. Ev
 | Config file | `<state>/config.toml` |
 | Environment variable prefix | `COPILOTMEM_*` |
 | Placeholder API key value | `copilotmem-proxy` |
-| Process title | `copilotmem serve` |
+| Process title (main) | `copilotmem serve` |
 | Plugin/marketplace cache | **NONE** — CopilotMem is not a plugin |
+| **Headroom sidecar IPC socket** (v0.5) | `<state>/services/headroom/sock` (UDS on Linux/macOS); `\\.\pipe\copilotmem-headroom` (Named Pipe on Windows) |
+| **Headroom sidecar PID / logs** (v0.5) | `<state>/services/headroom/{pid,logs/}` |
+| **Recursion-guard header** (v0.5) | `X-CopilotMem-Extensions: none` on every internal LLM call. Enforces PRD §7.2.5. |
 
 **Coexistence test** (must pass before v0.1 ships): copilot-api on `:4141`, claude-mem's worker on `:37777`, and CopilotMem on `:4242` all running simultaneously on the same machine, with no collision.
 
@@ -135,9 +141,15 @@ CopilotMem must coexist with the developer's existing tools during migration. Ev
 
 ## 7. Phase 0 work items (what to build next)
 
-The repo currently has: PRD, README, LICENSE, .gitignore, .gitmodules, `vendor/copilot-api/` submodule. **Nothing else.**
+The repo currently has: PRD (v0.5), README, LICENSE, .gitignore, .gitmodules, `vendor/copilot-api/` submodule, CLAUDE.md, `.githooks/`, `scripts/{install-hooks.{sh,ps1},file_phase_issues.py,copilotmem_project.json}`. **Nothing else in `src/` yet.**
 
-Phase 0 requires:
+**Two more submodules land during Phase A** (issue #9, blocking all Phase B work):
+- `vendor/claude-mem/` — TypeScript, will be selectively imported per PRD §7.2.2 allowlist
+- `vendor/headroom/` — Python + Rust, will run as supervised subprocess per PRD §7.2.3
+
+Both are present but unused in Phase 0 code (Phase 0 only wraps `vendor/copilot-api/`). After #9 closes, `git submodule status` should show three entries.
+
+Phase 0 remaining work (issues #10-#19 filed as batch under #6):
 
 ### 7.1 Project foundations
 
@@ -220,9 +232,11 @@ Phase 0 requires:
 - Do **not** add Claude Code plugin surface (`.claude-plugin/`, `hooks.json`, marketplace metadata). CopilotMem is not a plugin.
 - Do **not** add lifecycle-hook integrations for any specific IDE. Capture happens at the HTTP layer.
 - Do **not** add authentication surface (API keys, OAuth for callers). Single-user, localhost-only means no auth is needed by design (PRD §10.8).
-- Do **not** vendor claude-mem or headroom source into this repo. They are ports, not imports. Copy the algorithmic ideas with attribution headers, don't paste files.
-- Do **not** introduce a build step that requires Python or Rust at install time. Optional prose compression uses a lazy Python sidecar; that's the only exception, and it must be opt-in.
+- Do **not** import any file from a vendored submodule (`vendor/claude-mem/`, `vendor/headroom/`) without running the three-step auth-chain audit in §9.6 first. Any file that reads Anthropic env vars, spawns `claude` CLI, or POSTs to a non-Copilot host is **denylisted** — replace with a CopilotMem-native shim that routes through the proxy with `X-CopilotMem-Extensions: none`. This is the mechanism of PRD §7.2.5.
+- Do **not** edit files inside any `vendor/*/` directory in-place from this repo. Bug fixes flow via the developer's working clone of the fork (e.g. `H:\masterswork\git\OpenBBTechnical\copilot-api\`) → push to the `prajoria/*` remote → `git submodule update` in this repo.
+- Do **not** silence a child-process's stdout/stderr. The v0.5 aggregator model spawns `vendor/headroom/` as a supervised subprocess; per §9.2 all child output goes to `<state>/services/<name>/logs/`, never `/dev/null` and never a hidden Windows window.
 - Do **not** commit any file to `<state>/` or reference absolute paths that leak the developer's machine layout.
+- Do **not** introduce a build-time Python or Rust dependency into the **main CopilotMem process**. Those toolchains are required only for **building** `vendor/headroom/`; the CopilotMem binary itself remains Bun-only. End users of the release bundle need neither Python nor Rust.
 
 ### 8.5 Issue-first workflow (mandatory)
 
@@ -280,6 +294,7 @@ Several failures were Windows-only: `bun.cmd` shim missing when Bun installed vi
 claude-mem's LLM summarizer required a completely separate Anthropic OAuth login (`/login`) from the Copilot proxy's own auth. This defeated the point of the proxy — the developer already had upstream credentials. **Mitigation in CopilotMem**:
 
 - The memory extension's summarizer calls the CopilotMem proxy itself (with `X-CopilotMem-Extensions: none` to avoid recursion). It uses whatever upstream the proxy is already authenticated to. No separate auth chain, ever.
+- **v0.5 escalation**: this became the **single-auth-chain rule** codified as PRD §7.2.5 and enforced by contract test `tests/contract/no-second-auth.test.ts` (issue #14). See §9.6 below for the pre-import audit checklist that keeps vendored submodule code from silently re-introducing this trap.
 
 ### 9.5 Multiple-version confusion
 
@@ -287,20 +302,56 @@ The claude-mem plugin had two versions installed side-by-side (`13.10.2` and `13
 
 - Single binary. There is exactly one version installed at a time. No plugin manager to leave stale versions.
 
+### 9.6 Auth-chain audit for vendored code (v0.5)
+
+When wrapping vendored submodule code (`vendor/claude-mem/`, `vendor/headroom/`), the auth-chain audit is **mandatory before any `import` statement lands** referencing that file. This is the mechanism that protects PRD §7.2.5 during ongoing development.
+
+**Three-step checklist per vendored file, in order** (any hit blocks the import; the file must be replaced by a shim):
+
+1. **Grep for auth-token env-var reads**. Run against the specific file (not the whole submodule):
+   ```bash
+   grep -nE 'ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_MEM_ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|buildIsolatedEnvWithFreshOAuth|readClaudeOAuthToken|getAuthMethodDescription' <file>
+   ```
+   Any hit → the file authenticates to Claude/Anthropic. Do not import; write a shim that POSTs to `http://127.0.0.1:4242` with `X-CopilotMem-Extensions: none` instead.
+
+2. **Trace outbound HTTP for non-Copilot hosts**. Scan the file (and its transitive imports within the submodule) for hostnames other than localhost, `github.com`, or the Copilot API endpoints:
+   ```bash
+   grep -rnE 'api\.anthropic\.com|console\.anthropic\.com|claude\.ai/api' <file>
+   ```
+   Any hit → same treatment. Non-Copilot HTTP callers must be replaced.
+
+3. **Trace subprocess spawns for CLIs that authenticate independently**. Look for `spawn`, `exec`, `execFile`, `child_process`, `Bun.spawn` calls whose command name is `claude`, `anthropic`, or a wrapper around an OAuth flow:
+   ```bash
+   grep -nE '(spawn|exec|execFile|Bun\.spawn)\([^)]*(claude|anthropic|/login)' <file>
+   ```
+   Any hit → same treatment.
+
+**All three passes must be clean before the import is allowed.** The grep-based contract test in `tests/contract/no-second-auth.test.ts` (issue #14) is a CI backstop for what this checklist catches at development time; both layers exist because either can miss things the other catches (checklist misses newly-discovered auth surfaces; test misses whole-file semantics).
+
+**Record the audit result** — when adding a new import from a submodule, cite the audit in the commit message body: `Auth-chain audit passed for vendor/claude-mem/src/storage/sqlite/schema.ts (no matches on any of the 3 passes).`
+
+**When in doubt, shim.** The cost of a small shim (a few hundred lines of TypeScript that POST to the local proxy) is trivial compared to the cost of a second auth chain sneaking into the codebase. The default answer to "should I import this file?" for anything touching LLMs, spawns, or env vars is **no**.
+
 ---
 
 ## 10. Runtime and dependencies
 
-**Confirmed working combinations** (from the source-project analysis):
+**Main CopilotMem process (Bun-only, end-user)**:
 
 - **Bun 1.3+** — primary runtime. Ships `bun:sqlite` natively.
 - **Node.js 20.12+** — compatibility target; tests must pass on Node too.
 - **TypeScript 5.x** — strict mode.
 - **Hono 4.x** — HTTP framework. Runs on both Bun and Node.
-- **tree-sitter** (for Phase 2 code compression) — Bun has native bindings.
 - **Windows 11, macOS 14+, Linux (glibc 2.31+ or musl)** — supported platforms.
 
-**No cloud dependencies at build or runtime.**
+**Headroom sidecar (subprocess, `vendor/headroom/`, build-time only for developers)** — v0.5:
+
+- **Python 3.11+** — headroom's primary language.
+- **Rust toolchain (`cargo`)** — for headroom's Rust components.
+- **`tree-sitter`** (for Phase 2 code compression) — headroom links this natively.
+- **End users of the release bundle need neither Python nor Rust.** Each platform bundle ships the pre-built headroom binary; only contributors building headroom from source need the toolchain.
+
+**No cloud dependencies at runtime for the main process.** The headroom sidecar is audited (§9.6) to disable hosted-inference and telemetry endpoints before it's enabled — no phone-home from any subprocess either.
 
 ---
 
