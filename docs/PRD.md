@@ -1,11 +1,22 @@
 # CopilotMem — Product Requirements Document
 
-**Version**: 0.4 (draft for review)
+**Version**: 0.5 (aggregator model + single-auth-chain rule)
 **Status**: Repo bootstrapped; Phase 0 in progress
 **Owner**: TBD
-**Last updated**: 2026-07-13
+**Last updated**: 2026-07-14
 **Scope**: Single-user, single-workstation. Multi-session and multi-project support within that scope.
 **Change tracking**: Every substantive change to this repo is tracked by a GitHub issue on [`prajoria/copilotmem`](https://github.com/prajoria/copilotmem/issues) before work begins. See SESSION-START §8.5.
+
+**v0.5 changelog** (from v0.4):
+- **§7.2 rewritten** — the "hybrid submodule + port" strategy is replaced by a **uniform three-submodule aggregator model**. `claude-mem` and `headroom` become submodules under `vendor/`, joining `copilot-api`. Language mismatch (headroom's Python + Rust) is handled by running the mismatched submodule as a supervised subprocess, not by rewriting it.
+- **§7.2.5 (new)** — codifies the **single-auth-chain rule** (no second Anthropic/Claude auth chain anywhere in the system). Enforced by a grep-based contract test on every commit.
+- **§7.5** — namespace table adds rows for the subprocess IPC socket and the recursion-guard header value.
+- **§7.3** — repo layout gains `vendor/claude-mem/` and `vendor/headroom/`; `src/extensions/{memory,compress}/` become **adapter layers** (thin wrappers + summarizer/IPC shims) rather than ports.
+- **§10.5** — "single binary" reframed as **single install bundle** (Bun binary + built subprocess sidecar + submodule copies).
+- **§6** — memory footprint budget adjusted for subprocess overhead (200 MB → 350 MB with default extensions enabled).
+- **§12** — success criterion "First-run under 5 min" scoped to the bundled installer; other criteria unchanged.
+- **§13** — recursion-loop risk elevated from High to **Critical** (breaks the single-auth-chain rule) with contract-test enforcement.
+- **§14** — Phase 1 shrinks from ~3 weeks to ~1 week (wrap vs. port); Phase 2 similarly.
 
 ---
 
@@ -151,7 +162,7 @@ When enabled, the memory extension captures LLM traffic and makes it queryable a
 
 **Summarization** (optional sub-capability):
 - Sessions and individual observations can be LLM-summarized for compact retrieval later.
-- Summarization uses the proxy itself as its LLM backend — no separate provider account or auth chain is required. This solves the "the summarizer needs a separate Anthropic OAuth login" problem observed with existing tools.
+- Summarization uses the proxy itself as its LLM backend — no separate provider account or auth chain is required. This solves the "the summarizer needs a separate Anthropic OAuth login" problem observed with existing tools. **This is the single-auth-chain rule (§7.2.5), enforced by contract test `tests/contract/no-second-auth.test.ts`.** Every internal LLM call sets `X-CopilotMem-Extensions: none` as a recursion guard; the proxy detects the marker and refuses to re-enter extensions.
 - Summarization is throttled and quota-aware so it does not exhaust upstream credits.
 
 **Retrieval**:
@@ -207,7 +218,7 @@ When enabled, the compression extension shrinks prompts before they reach the up
 | **Vanilla latency overhead** | Under 5ms p50 per request compared to a bare proxy of the same wire format. |
 | **Memory extension overhead** | Under 50ms p50 per request; under 200ms p99. Capture happens async so the client never blocks. |
 | **Compression overhead** | Variable by algorithm; JSON under 20ms per request, code under 100ms, prose bounded by ML model latency and opt-in only. |
-| **Memory footprint** | RSS under 200MB steady state with default extensions enabled. |
+| **Memory footprint** | RSS under 350MB steady state with default extensions enabled (up from 200MB in v0.4 to account for the headroom compression sidecar subprocess; the main CopilotMem process alone stays under 200MB). |
 | **Disk footprint** | Database growth bounded by configurable retention policy; default cap 5GB with warn at 1GB. |
 | **Concurrency** | Handle at least 5 concurrent sessions from different clients without cross-talk or performance degradation. |
 | **Platform support** | Windows 11, macOS 14+, Linux (glibc 2.31+ / musl). Windows is the first-tested platform. |
@@ -243,100 +254,166 @@ This repository owns:
 
 ### 7.2 Source projects and their roles
 
-Three existing open-source projects provide implementations that inform or seed CopilotMem's development. Each has a clearly-defined role. The strategy is **hybrid**: one source is tracked as a git submodule for cheap upstream sync; two are ported once and owned outright. The rationale below explains why each is treated differently.
+**v0.5 aggregator model.** All three source projects are wrapped as **git submodules** under `vendor/`. CopilotMem's value is the unified surface (one HTTP endpoint, one config, one database, one auth relationship with Copilot), not the unified codebase. Language decides integration mode:
 
-#### 7.2.1 Copilot API proxy (upstream: `ericc-ch/copilot-api`)
+- **Same-language submodules** (`copilot-api`, `claude-mem`, both TypeScript) → imported in-process via ESM.
+- **Language-mismatched submodules** (`headroom`, Python + Rust) → run as a supervised subprocess with IPC over Unix Domain Socket (Linux/macOS) or Named Pipe (Windows).
 
-**Role**: **Git submodule at `vendor/copilot-api/`.**
+The aggregator principle is uniform; only the process boundary differs.
 
-The Copilot proxy — its OpenAI/Anthropic translation logic, GitHub Copilot device-code authentication flow, and route handlers — is tracked as a git submodule under `vendor/copilot-api/`. CopilotMem's `src/core/` contains only **glue code**: pipeline adapters that import from the submodule, extend where needed, and expose the results through CopilotMem's unified request/response types.
+**Selective import is mandatory.** Every submodule's source tree contains files that must **not** be imported by CopilotMem — for `claude-mem` in particular, the summarizer / worker / hooks / installer subsystems introduce a second Anthropic auth chain that would break the single-auth-chain rule (§7.2.5). The per-submodule denylists below are enforced by contract test.
 
-**Why a submodule (not a vendored copy)**:
-- **Same language.** copilot-api is TypeScript; no cross-language build burden.
-- **Small and stable.** ~2500 LOC of protocol translation that changes rarely. When it does change (Copilot API updates, new model support), we want those fixes cheaply via `git submodule update --remote`.
-- **Well-scoped.** copilot-api does one thing (Copilot ↔ OpenAI/Anthropic translation). No overreach into memory, plugin frameworks, or IDE-specific hooks that would need stripping out.
-- **Clear license.** Attribution stays in the submodule's own tree; CopilotMem's LICENSE covers only its own glue code.
+#### 7.2.1 Copilot API proxy (upstream: `prajoria/copilot-api`)
 
-**Ongoing relationship**: pin the submodule to a specific SHA in `main`. Bump the SHA in dedicated PRs with a changelog entry. Feature branches may temporarily point at unmerged upstream branches when adopting pre-release upstream fixes.
+**Role**: **Git submodule at `vendor/copilot-api/`, imported in-process.**
 
-#### 7.2.2 Claude-mem (upstream: `thedotmack/claude-mem`)
+The Copilot proxy — its OpenAI/Anthropic translation logic, GitHub Copilot device-code authentication flow, and route handlers — is tracked as a git submodule. CopilotMem's `src/core/` contains only **glue code**: thin adapters that import from the submodule, extend where needed, and expose the results through CopilotMem's unified request/response types.
 
-**Role**: **Referenced for architecture; specific components ported into `src/extensions/memory/`, not submoduled.**
+**Import allowlist** (safe subsystems):
+- `src/routes/messages/{non-stream,stream}-translation.ts` — protocol translation
+- `src/services/copilot/*` — upstream client
+- `src/services/github/*` — device-code OAuth (this **is** the sanctioned auth path — Copilot upstream — not a competing chain)
 
-Claude-mem contributes the memory extension's design and, selectively, its implementation:
-- `SessionStore` schema and query patterns → ported to `src/extensions/memory/storage.ts`
-- FTS5 search indexing approach → ported to `src/extensions/memory/search.ts`
-- Observation summarization pipeline → ported and re-architected to use CopilotMem's own proxy as the LLM backend
-- Viewer UI → re-implemented (see §10.3)
-- Migration tool → new code that reads claude-mem's SQLite schema and writes CopilotMem's
+**Auth surface**: GitHub Copilot device-code flow, which **is** CopilotMem's single auth chain. No conflict.
 
-**Why not a submodule**: claude-mem is a Claude-Code-specific plugin with a ~30k LOC surface area tied to lifecycle hooks that CopilotMem does not use. Importing the whole project would pull in dependencies (Chroma vector store, React viewer, PostgreSQL server-mode support, multi-host installers) that CopilotMem intentionally rejects. The valuable pieces are algorithmic (schema, query patterns, summarization prompts), and those port cleanly as isolated modules. A submodule would tie us to upstream's plugin-shape decisions that we've explicitly moved away from.
+**Ongoing relationship**: pin the submodule to a specific SHA in `main`. Bump the SHA in dedicated PRs tracked by their own issues. Feature branches may temporarily point at unmerged upstream branches when adopting pre-release upstream fixes. Bug fixes flow via the developer's working fork clone at `H:\masterswork\git\OpenBBTechnical\copilot-api\` → push → `git submodule update` here.
 
-**Ongoing relationship**: monitor upstream for schema changes that the migration tool needs to handle; otherwise independent. Reference their commit SHA in per-port file headers so future maintainers can trace lineage.
+#### 7.2.2 Claude-mem (upstream: `prajoria/claude-mem`, forked from `thedotmack/claude-mem`)
+
+**Role**: **Git submodule at `vendor/claude-mem/`, imported selectively in-process. Summarizer replaced by a CopilotMem-native shim.**
+
+Change from v0.4: the memory extension is no longer a ~5 kLOC port; it is a **wrapper** around specific claude-mem subsystems, plus a small shim (~100 LOC) that replaces the LLM-calling code path.
+
+**Import allowlist** (safe — no auth surface):
+- `src/storage/sqlite/*` — schema, migrations, connection pool
+- `src/services/context/*`, `src/services/context-generator.ts` — retrieval logic
+- `src/services/transcripts/*` — Claude Code transcript parsing
+- `src/ui/*` — HTMX viewer (server-rendered HTML)
+
+**Import denylist** (auth-touching — must be replaced by shims in `src/extensions/memory/`):
+- `src/shared/EnvManager.ts` — manages Claude Desktop OAuth tokens (violates §7.2.5)
+- `src/services/worker/ClaudeProvider.ts` — spawns `claude` CLI with OAuth env (violates §7.2.5)
+- `src/services/worker/knowledge/KnowledgeAgent.ts` — LLM summarizer via OAuth env (violates §7.2.5)
+- `src/server/runtime/create-server-service.ts` — reads `ANTHROPIC_API_KEY` (violates §7.2.5)
+- `src/cli/*`, `src/hooks/*`, `src/npx-cli/*` — Claude Code plugin surface (violates the no-plugin rule in §7.5)
+
+**The summarizer shim** (`src/extensions/memory/summarizer.ts`) replaces the ~2 kLOC of `ClaudeProvider + KnowledgeAgent + EnvManager` with ~100 LOC of code that POSTs to `http://127.0.0.1:4242/v1/messages` with `X-CopilotMem-Extensions: none`. This is the concrete mechanism of the single-auth-chain rule.
+
+**Ongoing relationship**: monitor upstream for schema changes; bump the submodule SHA in dedicated PRs. Bug fixes to claude-mem itself flow via `prajoria/claude-mem` (your fork) → push → `git submodule update`. Never edit `vendor/claude-mem/` in-place from this repo.
 
 #### 7.2.3 Headroom (upstream: `prajoria/headroom`)
 
-**Role**: **Reference implementation for compression algorithms; algorithms reimplemented in TypeScript in `src/extensions/compress/`, not submoduled.**
+**Role**: **Git submodule at `vendor/headroom/`, run as a supervised subprocess (IPC over UDS / Named Pipe).**
 
-Headroom contributes the compression extension's algorithms and their evaluation methodology:
-- **SmartCrusher** (JSON compression) → reimplemented in TypeScript
-- **CodeCompressor** (AST-aware) → reimplemented using `tree-sitter` bindings
-- **CCR (reversible compression)** → reimplemented; the storage side is trivial with SQLite already in the stack
-- **CacheAligner** → reimplemented; a prefix-normalization pass under 200 LOC
-- **kompress-base** (ML prose compression) → left in Python; CopilotMem spawns a Python sidecar on-demand only if the developer opts into prose compression
+Change from v0.4: compression algorithms are no longer ported to TypeScript; they run in headroom's native Python+Rust process, spawned and supervised by CopilotMem. The compression extension in `src/extensions/compress/` is a thin **IPC client** (~200 LOC) that speaks headroom's protocol.
 
-**Why not a submodule**: headroom is 76.8% Python and 18.4% Rust. Submoduling would force every CopilotMem consumer to install both toolchains at build time even if they never use compression. Since the compression algorithms are algorithmic rather than framework code, a port to TypeScript is straightforward and removes the cross-language dependency for the base install.
+**Why subprocess, not in-process**:
+- Language mismatch. Bun cannot import Python or Rust modules directly.
+- **Bundling still works**: the CopilotMem release ships as a bundle (Bun binary + pre-built headroom sidecar + submodule copies), not as one file. Users install one bundle, not three projects.
+- **Auth surface**: compression operates on prompt bytes and does not call any LLM API. No second auth chain (verified during Phase 2 wiring per §7.2.5 audit).
 
-**Ongoing relationship**: monitor upstream for algorithm improvements; port them as they mature. Reference commit SHAs in per-port file headers.
+**Import allowlist** (via IPC — no direct code imports, but the subprocess must be launched in a mode that stays inside these bounds):
+- SmartCrusher (JSON compression)
+- CodeCompressor (tree-sitter-based code compression)
+- CCR reversible storage
+- CacheAligner
 
-#### 7.2.4 Summary of submodule policy
+**Import denylist** (must be disabled via headroom's own config when the subprocess is launched):
+- Any hosted-inference model calls (headroom's optional prose-compression path — verify before enabling; prose compression stays opt-in per §5.3)
+- Any auth/telemetry endpoints that phone home
 
-| Source project | Strategy | Location | Rationale |
-|---|---|---|---|
-| copilot-api | **Submodule** | `vendor/copilot-api/` | Same language, small, stable, well-scoped |
-| claude-mem | **Ported** | `src/extensions/memory/*` (with SHA references in file headers) | Wrong shape (IDE plugin), 30k LOC of unwanted surface |
-| headroom | **Ported** | `src/extensions/compress/*` (with SHA references in file headers) | Wrong language (Python/Rust), would burden every build |
+**Ongoing relationship**: pin submodule SHA; bump in dedicated PRs. Headroom's build produces platform-specific binaries; the CopilotMem release bundle carries the correct one per platform. First-run instructions document how to build the sidecar from source if the pre-built binary is missing.
+
+#### 7.2.4 Summary of aggregator model
+
+| Source project | Strategy | Location | Integration mode | Auth-surface handling |
+|---|---|---|---|---|
+| copilot-api | Submodule | `vendor/copilot-api/` | In-process (ESM import) | Its auth **is** CopilotMem's single auth chain |
+| claude-mem | Submodule | `vendor/claude-mem/` | In-process (selective ESM import) | Denylist blocks summarizer/worker/hooks; shim replaces summarizer |
+| headroom | Submodule | `vendor/headroom/` | Supervised subprocess (UDS / Named Pipe) | No LLM calls in the compression path; audited before enabling |
+
+#### 7.2.5 The single-auth-chain rule (non-negotiable)
+
+**No caller of any CopilotMem component may require a Claude/Anthropic OAuth login, API key, or credential that is separate from the Copilot upstream token CopilotMem already holds.**
+
+Every LLM call in the whole system — including CopilotMem's own internal summarizer calls, memory-context calls, and health-probe calls — routes through the proxy itself at `http://127.0.0.1:4242`, using the **recursion-guard header value** `X-CopilotMem-Extensions: none` so the proxy detects the internal call and refuses to re-enter extensions (avoiding infinite loops).
+
+**Concrete meaning per subsystem**:
+
+- **`vendor/copilot-api/`** — its OAuth flow **is** the single sanctioned auth chain. No shim needed; imported as-is.
+- **`vendor/claude-mem/`** — every subsystem is audited (§7.2.2 denylist). Auth-touching files (`EnvManager`, `ClaudeProvider`, `KnowledgeAgent`, `create-server-service`) are on the denylist and replaced by CopilotMem-native shims that POST to the proxy.
+- **`vendor/headroom/`** — the subprocess is launched in a config that disables any hosted-inference or telemetry endpoint. Compression itself does not authenticate; only the optional prose-compression ML model does, and that model is local-only per §10.7.
+
+**Enforcement** — three layers, cheapest first:
+
+1. **Grep-based contract test** `tests/contract/no-second-auth.test.ts` — scans all `src/**/*.{ts,tsx}` on every commit for a denylist of forbidden strings (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MEM_ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `buildIsolatedEnvWithFreshOAuth`, `readClaudeOAuthToken`, `api.anthropic.com`, `console.anthropic.com`, `claude.ai/api`) and forbidden import paths (`vendor/claude-mem/src/shared/EnvManager*`, `.../ClaudeProvider*`, `.../KnowledgeAgent*`, etc.). Failure = commit is blocked in CI.
+
+2. **Audit checklist** — every vendored file goes through the three-step audit in SESSION-START §9.6 before being added to any import allowlist. If any hit, the file cannot be imported; a shim replaces it.
+
+3. **Recursion-guard header** — proxy detects `X-CopilotMem-Extensions: none` on incoming requests, refuses to re-enter the extension pipeline, guaranteeing termination.
+
+**Why this rule matters**: the debugging saga that motivated CopilotMem's existence (SESSION-START §9.4) traced back to exactly this failure mode — `claude-mem`'s summarizer required its own Anthropic OAuth login separate from the Copilot proxy's own auth, defeating the point of the proxy. CopilotMem exists to solve this. Losing this rule reduces CopilotMem to a distribution convenience for tools that still don't cooperate; keeping it is what makes the product architecturally different from a naive "aggregator of tools."
 
 ### 7.3 Repository layout inside CopilotMem
 
 ```
 copilotmem/
 ├── vendor/
-│   └── copilot-api/                     # git submodule → ericc-ch/copilot-api
+│   ├── copilot-api/                     # git submodule → prajoria/copilot-api (TS, in-process)
+│   ├── claude-mem/                      # git submodule → prajoria/claude-mem (TS, selective in-process, see §7.2.2 denylist)
+│   └── headroom/                        # git submodule → prajoria/headroom (Python+Rust, supervised subprocess)
 ├── src/
 │   ├── core/                            # Vanilla proxy; always active
 │   │   ├── proxy.ts                     # entry, wires routes to pipeline
 │   │   ├── routes/                      # thin adapters that call into vendor/copilot-api
 │   │   ├── translation/                 # thin adapters (Anthropic ↔ OpenAI)
 │   │   ├── upstream/                    # thin adapters over vendor/copilot-api services
-│   │   └── auth/                        # thin adapter over vendor/copilot-api's device-code flow
+│   │   ├── auth/                        # thin adapter over vendor/copilot-api's device-code flow
+│   │   └── rate-limit.ts                # TOS-compliance limiter (core; see §10.9)
 │   ├── extensions/                      # Each self-contained
-│   │   ├── memory/                      # ported concepts from claude-mem (SHA refs in file headers)
-│   │   ├── compress/                    # ported algorithms from headroom (SHA refs in file headers)
-│   │   ├── cache-align/                 # ported from headroom
-│   │   └── tos-rate-limit/              # ported from copilot-api (TOS compliance, not user throttling)
+│   │   ├── memory/                      # ADAPTER over vendor/claude-mem/ per §7.2.2 allowlist
+│   │   │   ├── summarizer.ts            # SHIM — replaces claude-mem's ClaudeProvider/KnowledgeAgent/EnvManager;
+│   │   │   │                              # posts to http://127.0.0.1:4242 with X-CopilotMem-Extensions: none
+│   │   │   ├── storage.ts               # thin wrapper over vendor/claude-mem/src/storage/sqlite/
+│   │   │   └── retrieval.ts             # thin wrapper over vendor/claude-mem/src/services/context/
+│   │   ├── compress/                    # IPC CLIENT to vendor/headroom/ subprocess
+│   │   │   ├── client.ts                # UDS / Named Pipe client
+│   │   │   └── supervisor.ts            # spawn / health / restart of headroom sidecar
+│   │   ├── cache-align/                 # thin over headroom's CacheAligner (via subprocess IPC)
+│   │   └── tos-rate-limit/              # (moved to core/rate-limit.ts; kept here as compat shim if needed)
 │   ├── pipeline/                        # New middleware runtime
+│   │   ├── types.ts                     # RequestContext, ResponseContext, ProxyExtension
+│   │   ├── isolation.ts                 # try/catch + timeout wrapper (fail-open per §2)
+│   │   ├── loader.ts                    # dynamic import of extensions
+│   │   └── executor.ts                  # 9-stage pipeline runner per §8.1
 │   ├── cli/                             # Subcommands (serve, auth, search, config, mcp, export-state)
-│   ├── shared/                          # Config, types, logger, path resolution (see §7.5)
+│   ├── shared/                          # Config, types, logger, path resolution, pidfile (see §7.5)
 │   └── migrations/                      # SQLite schema migrations per extension
 ├── tests/
-│   ├── contract/                        # Vanilla-invariant tests: byte-identical to bare proxy
+│   ├── contract/                        # Vanilla-invariant + no-second-auth tests (§7.2.5)
 │   ├── coexistence/                     # §7.5 assertion: run alongside copilot-api + claude-mem
 │   ├── integration/
 │   └── unit/
 ├── scripts/
 │   ├── build.ts
 │   ├── bump-copilot-api.ts              # helper to bump submodule + regenerate adapter stubs
-│   └── install.ps1
+│   ├── bump-claude-mem.ts               # same for claude-mem submodule
+│   ├── bump-headroom.ts                 # same for headroom submodule
+│   ├── install-hooks.{sh,ps1}           # sets git config core.hooksPath .githooks (see SESSION-START §8.5)
+│   ├── install.ps1                      # Windows first-run bootstrap
+│   ├── file_phase_issues.py             # bulk GitHub-issue filer for phase batches (see #6)
+│   └── copilotmem_project.json          # persisted project #6 IDs (fields, options, epic)
+├── .githooks/
+│   └── commit-msg                       # enforces issue-first rule from #1 (SESSION-START §8.5)
 ├── docs/
 │   ├── PRD.md                           # this document
 │   ├── ARCHITECTURE.md
 │   ├── EXTENSIONS.md
 │   └── MIGRATION.md
-├── .gitmodules                          # tracks vendor/copilot-api submodule
+├── .gitmodules                          # tracks all three submodules
 ├── package.json
 ├── config.example.toml
-└── LICENSE                              # Apache 2.0 (covers glue code and ports; submodule keeps its own)
+└── LICENSE                              # Apache 2.0 (covers glue code + shims; submodules keep their own)
 ```
 
 ### 7.4 What lives outside the repository
@@ -364,8 +441,11 @@ The following table is the definitive namespace mapping. Any code that reads or 
 | Env var prefix | (none) | `CLAUDE_MEM_*` | **`COPILOTMEM_*`** |
 | Placeholder API key value | `copilot-proxy` | (n/a) | **`copilotmem-proxy`** |
 | Marketplace / plugin cache | (n/a) | `~/.claude/plugins/cache/thedotmack/claude-mem/` | (n/a — no plugin surface) |
-| Process title | `node ... copilot-api/dist/main.js` | `bun ... worker-service.cjs` | **`copilotmem serve`** |
+| Process title (main) | `node ... copilot-api/dist/main.js` | `bun ... worker-service.cjs` | **`copilotmem serve`** |
 | Windows binary shim | (n/a — bun.cmd shim workaround) | (needs bun.cmd shim) | (own binary; no shim dependency) |
+| **Compression sidecar IPC socket** (v0.5) | (n/a) | (n/a) | **`<state>/services/headroom/sock`** (Unix Domain Socket on Linux/macOS); **`\\.\pipe\copilotmem-headroom`** (Named Pipe on Windows) |
+| **Compression sidecar PID / logs** (v0.5) | (n/a) | (n/a) | **`<state>/services/headroom/{pid,logs/}`** |
+| **Recursion-guard header value** (v0.5) | (n/a) | (n/a) | **`X-CopilotMem-Extensions: none`** — set on every internal LLM call; proxy detects marker and refuses to re-enter extensions. See §7.2.5. |
 
 **Rationale for each choice**:
 
@@ -587,14 +667,23 @@ Decisions previously left open have been resolved as follows:
 
 **Rationale**: TOML supports comments, is more forgiving of trailing commas and quoting, and is markedly friendlier for hand-editing. JSON is retained for machine-consumed exports and API responses.
 
-### 10.5 Distribution: pre-built binaries and package registries
+### 10.5 Distribution: single install bundle
 
-**Decision**: CopilotMem is distributed as:
-1. Pre-built binaries via GitHub Releases (primary channel).
-2. `npm install -g copilotmem` for Node users.
-3. `bun install -g copilotmem` for Bun users.
+**Decision** (v0.5): CopilotMem is distributed as a **single install bundle** per platform. Each bundle contains:
 
-Docker, Homebrew, winget, and chocolatey packaging are non-goals for v1; contributors welcome to add later.
+1. The CopilotMem binary (`bun build --compile` output).
+2. Pre-built `headroom` sidecar binary for the target platform (Python-embedded or standalone Rust binary, depending on final build shape).
+3. Submodule copies of `copilot-api` and `claude-mem` (source, since they run in-process via Bun's ESM loader — no separate build artifact).
+4. `install-hooks` and first-run bootstrap script.
+
+Distribution channels:
+- Pre-built bundles via GitHub Releases (primary channel), one per platform (Windows x86_64, Linux x86_64 glibc, Linux x86_64 musl, macOS arm64).
+- `npm install -g copilotmem` and `bun install -g copilotmem` fetch the platform-appropriate bundle.
+- Users install one bundle; internally it's three projects, but that's an implementation detail.
+
+**Change from v0.4**: the v0.4 "single binary" framing implied a monolithic executable. That was incompatible with reusing `headroom` (Python + Rust). v0.5 explicitly makes the distribution unit the bundle, not the binary. The user experience remains "download one thing, run one command."
+
+Docker, Homebrew, winget, and chocolatey packaging remain non-goals for v1; contributors welcome to add later.
 
 ### 10.6 Licensing
 
@@ -652,7 +741,8 @@ The product is successful for v1 when:
 | Criterion | Measurement |
 |---|---|
 | Vanilla mode is a drop-in replacement | Contract-test corpus of 200 recorded requests passes with byte-identical responses. |
-| First-run time is under 5 minutes | Timed from downloading the binary to seeing a proxied response in a supported client. Measured on a fresh Windows VM. |
+| **Single-auth-chain rule holds** (v0.5) | `tests/contract/no-second-auth.test.ts` passes on every commit — no forbidden strings or forbidden imports under `src/`. |
+| First-run time is under 5 minutes | Timed from downloading the release **bundle** (v0.5: bundle = CopilotMem binary + headroom sidecar + submodule copies) to seeing a proxied response in a supported client. Measured on a fresh Windows VM. |
 | Memory extension does not slow requests | p50 request latency within 50ms of vanilla; p99 within 200ms. Measured under sustained 5 concurrent sessions. |
 | Compression achieves stated ratio | Median 40-70% token reduction on a corpus of representative coding-assistant prompts. Reported at `/compress/stats`. |
 | Failure isolation holds | Chaos test: extension made to throw on every request. Request success rate remains 100%. |
@@ -667,7 +757,10 @@ The product is successful for v1 when:
 |---|---|---|---|
 | Compression degrades response quality | Medium | Medium | Reversibility opt-in by default. `/compress/stats` shows before/after samples. Per-request opt-out via header. |
 | Memory writes slow the request path | Low | High | All writes are async and off the request path. Load-tested under concurrency. |
-| Summarizer creates recursive loop | Medium | High | Summarizer sets `X-CopilotMem-Extensions: none` on its own outbound. Marker header detected and rejected if seen twice. |
+| **Summarizer / internal call creates recursive loop or second auth chain** (v0.5: elevated) | Medium | **Critical** (violates the single-auth-chain rule from §7.2.5) | Three enforcement layers: (1) `X-CopilotMem-Extensions: none` recursion-guard header on every internal call, detected and rejected on re-entry; (2) `tests/contract/no-second-auth.test.ts` grep-based CI gate; (3) per-vendored-file auth-chain audit per SESSION-START §9.6 before any import. |
+| **Vendored submodule import drift** (v0.5) | Medium (a well-meaning refactor imports a denylisted file) | **Critical** (silently introduces a second auth chain) | Same three enforcement layers as above. Denylists in §7.2.2 and §7.2.3. |
+| **Headroom subprocess crashes or hangs** (v0.5) | Medium | Medium | Supervisor (`src/extensions/compress/supervisor.ts`) restarts with exponential backoff. Compression stage falls back to no-op if sidecar unavailable (fail-open per §2). `/health?extensions=1` reports sidecar status. |
+| **Compression sidecar phones home / requires separate auth** (v0.5) | Low | **Critical** (violates §7.2.5) | Headroom is launched in a config that disables hosted-inference and telemetry endpoints. Audit performed during Phase 2 wiring (issue B5 / A3 successor). |
 | Extension crashes at load | High | Low | Loader catches, marks extension unavailable, proxy starts with remaining extensions. Reported at `/health`. |
 | Two proxy instances collide on the port | Medium | Medium | Pidfile-based startup handshake. `copilotmem serve --force` cleanly kills the previous owner. |
 | Concurrent sessions collide on session ID | Medium | Medium | Every supported client sets its own session ID header; when they don't, the working-directory + client-kind fallback disambiguates. Documented. |
@@ -675,56 +768,71 @@ The product is successful for v1 when:
 | Copilot terms-of-service compliance | Ongoing | High | Rate limit enforced by core, not toggleable off. Documented prominently. |
 | Windows file-locking prevents SQLite operations | Medium (based on observed failures with source projects) | High | WAL mode used. All file operations are atomic-write-then-rename. Antivirus interference tested for. |
 | Upstream Copilot API changes | Low per year, high impact when it happens | High | Translation code is isolated in `src/core/translation/` for easy patching. Contract tests catch regressions immediately. |
+| **Upstream claude-mem or headroom breaking change** (v0.5) | Medium per year | Medium | Submodule SHAs are pinned in `main`; upstream drift is opt-in via a dedicated bump PR that re-runs the auth-chain audit. |
 | Developer forgets to point client at proxy | High | Low | Launcher script templates in `docs/` set the env vars automatically. `copilotmem doctor` includes a check for common misconfigurations. |
 
 ---
 
 ## 14. Roadmap
 
+**v0.5 revision**: Phase 1 shrinks from 3 weeks to ~1 week because the memory extension is now a wrapper around `vendor/claude-mem/` (plus a summarizer shim) rather than a from-scratch port. Phase 2 similarly shrinks by wrapping `vendor/headroom/` as a supervised subprocess instead of porting compression algorithms.
+
 ### Phase 0 — Foundation (weeks 1-2)
 
-Deliverable: CopilotMem serves as a byte-identical drop-in for the imported Copilot proxy code. No extensions.
+**Deliverable**: CopilotMem serves as a byte-identical drop-in for the imported Copilot proxy code. No extensions loaded. All three submodules vendored but only `copilot-api` actively used. Ships **v0.1**.
 
-- Bootstrap the repository, CI, and release engineering.
-- Import Copilot proxy source code with attribution.
-- Refactor imported routes into the pipeline architecture (empty pipeline).
-- Implement extension loader and isolation.
-- Write the vanilla-invariant contract test suite.
-- Verify concurrent-session behavior with a load test.
-- Publish v0.1 pre-release.
+Tracked as GitHub issues #7-#19 (see epic #3). Sequenced slices:
 
-### Phase 1 — Memory extension (weeks 3-5)
+- **A1-A3** — doc frame revisions + submodule vendor (lands the v0.5 model this document describes).
+- **B1** — foundations: `package.json`, `tsconfig`, `bunfig`, `config.example`, CI (Ubuntu + Windows).
+- **B2** — shared utilities: `paths`, `config`, `logger`, `pidfile`.
+- **B3** — pipeline types (interfaces only; runtime lands after core is proven).
+- **B4a** — contract test: vanilla-invariant harness (record + replay). Lands **before** the core it guards.
+- **B4b** — contract test: no-second-auth grep-based enforcement. Lands **before** any submodule import.
+- **B5** — core proxy: routes, translation, upstream, auth, TOS rate-limit. Wraps `vendor/copilot-api/`.
+- **B6** — pipeline runtime: isolation, loader, executor. Wires into `src/core/proxy.ts`; empty extension list = same behavior as B5.
+- **B7** — CLI: `serve`, `auth`, `status`, `config`, `doctor-stub`.
+- **B8** — isolation + coexistence + concurrency tests.
+- **B9** — `docs/ARCHITECTURE.md`, `scripts/install.ps1`, single-bundle build, v0.1 tag.
 
-Deliverable: Memory capture and search work from any client, correctly attributed across concurrent sessions.
+### Phase 1 — Memory extension (week 3)
 
-- Port claude-mem schema and query patterns.
-- Implement HTTP capture at pipeline stages 3 and 7.
-- Implement session/project resolution (header, wire-format-native, cwd fallback).
-- Build the summarization pipeline using the proxy itself as the LLM backend.
-- Build the HTMX viewer.
-- Implement the claude-mem migration tool.
-- Publish v0.2.
+**Deliverable**: Memory capture and search work from any client, correctly attributed across concurrent sessions. Uses `vendor/claude-mem/` per §7.2.2 allowlist. Ships **v0.2**.
 
-### Phase 2 — Compression extension (weeks 6-9)
+- Wire `vendor/claude-mem/src/storage/sqlite/*` into `src/extensions/memory/storage.ts`.
+- Wire `vendor/claude-mem/src/services/context/*` into `src/extensions/memory/retrieval.ts`.
+- Write `src/extensions/memory/summarizer.ts` shim (~100 LOC): POSTs to `http://127.0.0.1:4242/v1/messages` with `X-CopilotMem-Extensions: none`. **Replaces** claude-mem's `ClaudeProvider + KnowledgeAgent + EnvManager`; per-file no-second-auth audit before merge.
+- Wire capture into pipeline stages 3 and 7 (per §8.1).
+- Wire the HTMX viewer from `vendor/claude-mem/src/ui/*` into `/memory/ui`.
+- Implement the claude-mem migration command (`copilotmem migrate --from claude-mem PATH`).
+- Extend `tests/contract/no-second-auth.test.ts` denylist as necessary; verify green.
 
-Deliverable: Prompts are automatically compressed with visible ratio reporting.
+**Estimated shrinkage** vs. v0.4's 3-week plan: schema/query patterns/viewer/summarizer prompts are all inherited from the submodule via import, so ~80% of the code is upstream. What remains is the summarizer shim, capture wiring, and the migration command.
 
-- Port SmartCrusher (JSON) to TypeScript.
-- Port CodeCompressor using tree-sitter.
-- Implement CCR reversible storage.
-- Implement CacheAligner as a separate pipeline stage.
-- Optional: Python sidecar for prose compression, feature-flagged.
-- Publish v0.3.
+### Phase 2 — Compression extension (weeks 4-6)
 
-### Phase 3 — Polish and portability (weeks 10-11)
+**Deliverable**: Prompts are automatically compressed with visible ratio reporting. Uses `vendor/headroom/` as a supervised subprocess. Ships **v0.3**.
 
-Deliverable: The developer can move CopilotMem between their own machines cleanly and troubleshoot common issues without external help.
+- Build supervised-subprocess infrastructure: `src/extensions/compress/supervisor.ts` (spawn, health, restart, pidfile per §7.5).
+- Build IPC client: `src/extensions/compress/client.ts` (UDS on Linux/macOS; Named Pipe on Windows).
+- Wire pipeline stages 4, 5, 8 to call the IPC client (compression, cache-align, decompression).
+- Run auth-chain audit on `vendor/headroom/` (§7.2.3 denylist) before enabling; disable hosted-inference/telemetry in headroom's launch config.
+- Implement `/compress/stats` endpoint using headroom's reporting.
+- Implement `/compress/retrieve` for CCR reversibility.
+- Extend release bundle builder to include the pre-built headroom sidecar per platform.
+- Windows sidecar build documented (Python + Rust toolchain on Windows is the hardest part).
 
-- `copilotmem export-state` / `import-state`.
-- `copilotmem doctor` diagnostic with clear remediation output.
-- Windows-first installer script.
-- End-to-end documentation walkthrough for first-time setup.
-- Publish v1.0 when stable.
+**Estimated shrinkage** vs. v0.4's 4-week plan: SmartCrusher, CodeCompressor, CCR, and CacheAligner are all reused as-is via subprocess IPC rather than reimplemented. The new work is the supervisor + IPC + bundle builder — worth ~2-3 weeks but strictly less than porting 4 algorithms in TS.
+
+### Phase 3 — Polish and portability (weeks 7-8)
+
+**Deliverable**: The developer can move CopilotMem between their own machines cleanly and troubleshoot common issues without external help. Ships **v1.0** when stable.
+
+- `copilotmem export-state` / `import-state` (per §6 Portability).
+- `copilotmem doctor` full impl (Phase 0 shipped a stub) — reports pidfile status, sidecar health, submodule SHAs, auth-chain audit results, common misconfig checks per §13 last row.
+- Windows-first installer script for the release bundle (`scripts/install.ps1` extended from Phase 0).
+- End-to-end documentation walkthrough for first-time setup (fresh Windows VM, download bundle, run, curl).
+- Publish v1.0.
 
 ### Explicitly deferred (not in v1)
 
